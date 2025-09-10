@@ -2,14 +2,30 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
-from together import Together
 from pygooglenews import GoogleNews
 import io
+import os
+import openai
 
-# --- Configuration ---
-# Replace with your actual API key for Together AI
-together_client = Together(
-    api_key="a510758b9bff7bf393548b99848a45972486dd1d699eb86a5e7735d2339c1d8c")
+# --- Functions ---
+
+# Function to get the SambaNova client securely
+def get_sambanova_client():
+    """
+    Initializes and returns a SambaNova API client.
+    
+    It fetches the API key from the environment variable 'SAMBANOVA_API_KEY'.
+    """
+    sambanova_api_key = "be38bb58-e3a4-422f-8e08-bdbbc6bbdc43"
+    if not sambanova_api_key:
+        st.error("SAMBANOVA_API_KEY environment variable is not set. Please set it in your environment.")
+        return None
+        
+    client = openai.OpenAI(
+        base_url="https://api.sambanova.ai/v1",
+        api_key=sambanova_api_key,
+    )
+    return client
 
 # --- Prompts ---
 PROMPT_INDIVIDUAL_ANALYSIS = """Carefully analyze the following news article text for information directly indicating potential reasons for client churn specifically for an **employee benefits company in India**. Focus only on details that would impact an employee benefits provider or suggest a company might reduce or discontinue its employee benefits programs.
@@ -19,15 +35,15 @@ PROMPT_INDIVIDUAL_ANALYSIS = """Carefully analyze the following news article tex
 
 Based on your analysis and using the provided categories below, determine the churn risk and the specific reason(s).
 
-1.  **Risk Level (First Line):** State the risk level as one of the following:
-    * "High Risk"
-    * "Medium Risk"
-    * "Low Risk"
-    * "No Churn Risk Indicated" (If no relevant information is found regarding churn for an employee benefits company)
+1.  **Risk Level (First Line):** State the risk level as one of the following:
+    * "High Risk"
+    * "Medium Risk"
+    * "Low Risk"
+    * "No Churn Risk Indicated" (If no relevant information is found regarding churn for an employee benefits company)
 
-2.  **Reason(s) for Risk (Second Line):** If a risk is indicated, explain the major reason(s) concisely, referencing the relevant category (e.g., "Reason: [Category Name] - Brief explanation."). If there are multiple relevant reasons, list them clearly.
+2.  **Reason(s) for Risk (Second Line):** If a risk is indicated, explain the major reason(s) concisely, referencing the relevant category (e.g., "Reason: [Category Name] - Brief explanation."). If there are multiple relevant reasons, list them clearly.
 
-3.  **2-Line Summary of Analysis (Third and Fourth Lines):** Provide a brief, overall summary of the article's relevance to churn for an employee benefits company, condensing the key findings into exactly two lines. If no churn risk is indicated, summarize why the article is not relevant.
+3.  **2-Line Summary of Analysis (Third and Fourth Lines):** Provide a brief, overall summary of the article's relevance to churn for an employee benefits company, condensing the key findings into exactly two lines. If no churn risk is indicated, summarize why the article is not relevant.
 
 **Categories for Reasons:**
 I. Corporate Restructuring (Mergers, Acquisitions, Joint Ventures, IPO, Entity Realignment, Rebranding, Consolidation, Subsidiary changes)
@@ -59,25 +75,22 @@ PROMPT_COMBINED_ANALYSIS = """Given the individual analyses of news articles rel
 In the first line, state the overall risk level for churn for the company (e.g., "Overall High Risk," "Overall Medium Risk," "Overall Low Risk," "Overall No Churn Risk Indicated"). In the subsequent lines, summarize the major reasons for this overall risk, drawing from the categories mentioned in the individual analyses. Be concise and focus on the most impactful reasons across all articles. If no relevant information is found across all articles, state "Overall No Churn Risk Indicated."
 """
 
-
-# --- Functions ---
-
-
 # Cache results for 1 hour to avoid repeated API calls
 @st.cache_data(ttl=3600)
-def analyze_text(company_name, provided_text, prompt_template, _together_client):
-    """Analyzes the provided text for churn indicators using Together AI."""
+def analyze_text(company_name, provided_text, prompt_template, _sambanova_client):
+    """Analyzes the provided text for churn indicators using SambaNova AI."""
     prompt = prompt_template.format(
         company_name=company_name, provided_text=provided_text)
     try:
-        response = _together_client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-            messages=[{"role": "user", "content": prompt}]
+        response = _sambanova_client.chat.completions.create(
+            model="Meta-Llama-3.3-70B-Instruct",
+            messages=[{"role": "user", "content": prompt}],
+            stream=False,
         )
         output = response.choices[0].message.content
         return output if output else f"Unexpected response: {output}"
     except Exception as e:
-        st.error(f"Error querying Together AI for {company_name}: {e}")
+        st.error(f"Error querying SambaNova AI for {company_name}: {e}")
         return "Analysis failed due to AI service error."
 
 
@@ -133,13 +146,16 @@ def process_article(article):
     return article.get('summary') or article.get('title') or ""
 
 
-def analyze_news(company_name, from_date, to_date, max_articles=10, queries=None, allowed_domains=None):
+def analyze_news(company_name, from_date, to_date, max_articles=10, queries=None, allowed_domains=None, sambanova_client=None):
     """
     Fetches news articles for a company and analyzes them for churn indicators.
     """
+    if not sambanova_client:
+        return {"individual_analyses": [], "overall_summary": "API client is not available."}
+        
     st.subheader(f"Analyzing News for **{company_name}**")
     all_articles = fetch_news(company_name, from_date,
-                              to_date, max_articles, queries, allowed_domains)
+                             to_date, max_articles, queries, allowed_domains)
 
     if not all_articles:
         return {"individual_analyses": [], "overall_summary": "No relevant news articles found for analysis."}
@@ -155,7 +171,7 @@ def analyze_news(company_name, from_date, to_date, max_articles=10, queries=None
 
         if article_text:
             analysis_result = analyze_text(
-                company_name, article_text, PROMPT_INDIVIDUAL_ANALYSIS, together_client)
+                company_name, article_text, PROMPT_INDIVIDUAL_ANALYSIS, sambanova_client)
             individual_analyses_list.append({
                 "title": article_title,  # Store the title
                 "url": article_url,
@@ -176,7 +192,7 @@ def analyze_news(company_name, from_date, to_date, max_articles=10, queries=None
         combined_prompt = PROMPT_COMBINED_ANALYSIS.format(
             individual_analyses_summary=combined_analysis_text_for_model.strip())
         overall_summary_result = analyze_text(
-            company_name, combined_prompt, "{provided_text}", together_client)
+            company_name, combined_prompt, "{provided_text}", sambanova_client)
 
     return {"individual_analyses": individual_analyses_list, "overall_summary": overall_summary_result}
 
@@ -220,6 +236,11 @@ def run_analysis(company_names, days_to_search, custom_keyword_string=None):
     from_date = today - timedelta(days=days_to_search)
     max_articles_per_query = 10
 
+    # Get the SambaNova client before starting the loop
+    sambanova_client = get_sambanova_client()
+    if not sambanova_client:
+        return {}
+        
     # --- DEFAULT CHURN KEYWORDS ---
     default_churn_keywords = {
         "Corporate Restructuring": [
@@ -312,7 +333,7 @@ def run_analysis(company_names, days_to_search, custom_keyword_string=None):
         queries = [company] + [f"{company} {keyword}" for category_keywords in churn_keywords_to_use.values()
                                for keyword in category_keywords]
         company_analysis = analyze_news(
-            company, from_date, today, max_articles_per_query, queries, processed_allowed_domains
+            company, from_date, today, max_articles_per_query, queries, processed_allowed_domains, sambanova_client
         )
         results[company] = company_analysis if company_analysis else {
             "overall_summary": "Analysis failed."}
@@ -529,4 +550,4 @@ if st.button("🚀 Start Analysis"):
 st.sidebar.markdown("---")
 st.sidebar.header("About")
 st.sidebar.info(
-    "This app leverages Together AI's Llama-3.3-70B-Instruct-Turbo-Free model and Google News for churn risk analysis.")
+    "This app leverages the **OpenRouter** API and specifically the free `meta-llama/llama-3.3-70b-instruct` model, along with Google News, for churn risk analysis.")
